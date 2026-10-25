@@ -1,31 +1,32 @@
-# Relámpago Movies — Plugin de Kino
+# Relámpago Movies — plugin para Kino
 
-Plugin para [Kino](https://kinotvapp.github.io/) que permite ver películas y series en español y latino desde [relampagomovies.com](https://relampagomovies.com/).
+Plugin de Kino para películas y series en español/latino. El catálogo usa TMDB como fuente de metadatos y `relampagomovies.com` se usa al momento de reproducir.
 
-## Características
+## Instalación
 
-- Catálogo de **Películas** y **Series**.
-- Búsqueda con soporte para `scopedSearch`.
-- Reproducción directa de embeds (mediadelivery / bunnycdn / filemoon) y fallback inteligente con `kino.browser.capture` de Kino.
-- Acceso a través de Cloudflare usando `kino.browser.page` (Kino 0.9.50+ / `apiVersion 6`).
-- Soporte para descargas sin conexión (`download`).
-- Ajustes con comprobación de estado de conexión y limpieza de caché.
-- Tema visual personalizado a juego con los colores del sitio.
+En Kino, añade:
 
-## Instalación en Kino
+```text
+JuanDEVYT/kino-plugin-relampagomovies
+```
 
-1. Abre **Kino** en tu dispositivo Android o Android TV.
-2. Ve a **Ajustes** → **Plugins** → **Añadir plugin**.
-3. Escribe el repositorio:
-   ```text
-   JuanDEVYT/kino-plugin-relampagomovies
-   ```
-4. Acepta los permisos para comenzar a reproducir.
+Se requiere Kino **0.9.50 o superior** (`apiVersion: 6`).
 
-## Desarrollo y Validación
+## Funcionamiento
 
-Para validar el plugin con el SDK oficial de Kino:
+- **Inicio, búsqueda y temporadas:** TMDB. No dependen del índice de Relámpago Movies ni de `kino.browser.page`.
+- **Reproducción:** al pulsar *Play*, el plugin prueba capturar el reproductor de `relampagomovies.com` con `kino.browser.capture`. Esta API se ejecuta solo dentro de Kino, no en las pruebas del SDK.
+- **TMDB:** primero usa la integración nativa de Kino. Si no hay clave configurada en Kino, emplea el fallback HTTP. En Ajustes se puede introducir una clave TMDB personal opcional.
+
+## Limitaciones conocidas
+
+`relampagomovies.com` protege sus páginas con Cloudflare y no proporciona API pública. El catálogo y las pruebas son verificables; la extracción de vídeo se debe comprobar desde un dispositivo con Kino, pues el navegador de captura no existe en el SDK de escritorio.
+
+## Desarrollo y pruebas
 
 ```bash
 node sdk/validate.mjs .
+node test/plugin.test.mjs
 ```
+
+Los tests verifican Home, búsqueda, paginación, episodios y ajustes contra TMDB. No prueban `resolve`, porque `kino.browser.capture` solo está disponible en la app.

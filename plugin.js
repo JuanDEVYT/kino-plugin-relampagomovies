@@ -1,10 +1,11 @@
 /// <reference path="./kino.d.ts" />
 
 // Plugin de Kino para Relámpago Movies (relampagomovies.com)
-// Catálogo enriquecido con TMDB (kino.tmdb nativo)
-// Reproductor directo y captura dinámica con kino.browser.capture (al pulsar Play)
+// Catálogo enriquecido con TMDB (vía kino.tmdb nativo o kino.fetch directo con fallback)
+// Reproducción con kino.browser.capture en resolve (al pulsar Play)
 
 const SITE_BASE = "https://relampagomovies.com";
+const TMDB_DEFAULT_KEY = "192e0b9821564f26f52949758ea3c473";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 const TMDB_BACKDROP = "https://image.tmdb.org/t/p/w780";
 const LANG = "es-MX";
@@ -34,6 +35,47 @@ function slugify(title) {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * Consulta a TMDB con doble estrategia:
+ * 1. kino.tmdb si está disponible en la app del usuario.
+ * 2. Si kino.tmdb falla con no_tmdb_key o no existe, usa kino.fetch directo con api_key de reserva o del usuario.
+ */
+async function tmdbQuery(path, params = {}) {
+  // 1. Intentar kino.tmdb primero
+  if (typeof kino.tmdb === "function") {
+    try {
+      const res = await kino.tmdb(path, params);
+      if (res) return res;
+    } catch (err) {
+      kino.log("kino.tmdb fallo, probando fallback directo:", err && err.code ? err.code : err);
+    }
+  }
+
+  // 2. Fallback con kino.fetch directo a api.themoviedb.org
+  const userKey = (kino.config.get("tmdb_api_key") || "").trim();
+  const apiKey = userKey || TMDB_DEFAULT_KEY;
+
+  const qParams = Object.assign({ api_key: apiKey, language: LANG }, params);
+  const qs = Object.keys(qParams)
+    .filter((k) => qParams[k] !== undefined && qParams[k] !== null && qParams[k] !== "")
+    .map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(qParams[k]))
+    .join("&");
+
+  const url = `https://api.themoviedb.org/3${path}?${qs}`;
+  const res = await kino.fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "KinoPlugin/1.0"
+    }
+  });
+
+  if (!res.ok) {
+    throw kino.error("unavailable", `TMDB status ${res.status}`);
+  }
+
+  return await res.json();
+}
+
 function mapTmdbItem(item, mediaType) {
   const type = mediaType || item.media_type || (item.first_air_date ? "series" : "movie");
   const isSeries = type === "series" || type === "tv";
@@ -47,7 +89,7 @@ function mapTmdbItem(item, mediaType) {
   return {
     id: (isSeries ? "tv." : "movie.") + item.id,
     title,
-    type: isSeries ? "series" : "movie",
+    kind: isSeries ? "series" : "movie",
     poster: item.poster_path ? TMDB_IMG + item.poster_path : undefined,
     backdrop: item.backdrop_path ? TMDB_BACKDROP + item.backdrop_path : undefined,
     year,
@@ -64,20 +106,15 @@ function mapTmdbItem(item, mediaType) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// HOME (PORTADA CON TMDB NATIVO)
+// HOME (PORTADA)
 // ──────────────────────────────────────────────────────────────
 
 export async function home() {
-  if (typeof kino.tmdb !== "function") {
-    throw kino.error("unavailable", "Kino 0.9.53+ requerido para TMDB", {
-      userMessage: "Actualiza Kino a la versión 0.9.53 o superior para usar este plugin."
-    });
-  }
-
-  const cached = kino.storage.get("home_catalog");
+  const cached = kino.storage.get("home_catalog_v2");
   if (cached) {
     try {
-      return JSON.parse(cached);
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
     } catch {}
   }
 
@@ -85,7 +122,7 @@ export async function home() {
 
   // 1. Tendencias en Películas
   try {
-    const popMovies = await kino.tmdb("/trending/movie/week", { language: LANG });
+    const popMovies = await tmdbQuery("/trending/movie/week");
     if (popMovies && Array.isArray(popMovies.results) && popMovies.results.length > 0) {
       rows.push({
         id: "peliculas-tendencia",
@@ -95,12 +132,12 @@ export async function home() {
       });
     }
   } catch (e) {
-    kino.log("Error al cargar trending movies de TMDB", e);
+    kino.log("Error al cargar trending movies:", e);
   }
 
   // 2. Tendencias en Series
   try {
-    const popTv = await kino.tmdb("/trending/tv/week", { language: LANG });
+    const popTv = await tmdbQuery("/trending/tv/week");
     if (popTv && Array.isArray(popTv.results) && popTv.results.length > 0) {
       rows.push({
         id: "series-tendencia",
@@ -110,12 +147,12 @@ export async function home() {
       });
     }
   } catch (e) {
-    kino.log("Error al cargar trending TV de TMDB", e);
+    kino.log("Error al cargar trending TV:", e);
   }
 
   // 3. Estrenos de cine
   try {
-    const nowPlaying = await kino.tmdb("/movie/now_playing", { language: LANG });
+    const nowPlaying = await tmdbQuery("/movie/now_playing");
     if (nowPlaying && Array.isArray(nowPlaying.results) && nowPlaying.results.length > 0) {
       rows.push({
         id: "estrenos-cine",
@@ -125,13 +162,12 @@ export async function home() {
       });
     }
   } catch (e) {
-    kino.log("Error al cargar now_playing de TMDB", e);
+    kino.log("Error al cargar now_playing:", e);
   }
 
   // 4. Animación familiar
   try {
-    const animation = await kino.tmdb("/discover/movie", {
-      language: LANG,
+    const animation = await tmdbQuery("/discover/movie", {
       with_genres: "16",
       sort_by: "popularity.desc"
     });
@@ -144,12 +180,12 @@ export async function home() {
       });
     }
   } catch (e) {
-    kino.log("Error al cargar animación", e);
+    kino.log("Error al cargar animación:", e);
   }
 
   if (rows.length > 0) {
     try {
-      kino.storage.set("home_catalog", JSON.stringify(rows), { ttlMs: 12 * 60 * 60 * 1000 });
+      kino.storage.set("home_catalog_v2", JSON.stringify(rows), { ttlMs: 12 * 60 * 60 * 1000 });
     } catch {}
   }
 
@@ -169,9 +205,8 @@ export async function search(query) {
   if (!q) return [];
 
   try {
-    const res = await kino.tmdb("/search/multi", {
+    const res = await tmdbQuery("/search/multi", {
       query: q,
-      language: LANG,
       include_adult: "false"
     });
 
@@ -182,7 +217,7 @@ export async function search(query) {
       .slice(0, 30)
       .map((i) => mapTmdbItem(i, i.media_type === "tv" ? "series" : "movie"));
   } catch (err) {
-    kino.log("Error en search TMDB", err);
+    kino.log("Error en search:", err);
     return [];
   }
 }
@@ -197,7 +232,7 @@ export async function browse(ref) {
 
   const page = data.page || 1;
   let path = "/trending/movie/week";
-  const params = { language: LANG, page: String(page) };
+  const params = { page: String(page) };
 
   if (data.list === "trending_movie") path = "/trending/movie/week";
   else if (data.list === "trending_tv") path = "/trending/tv/week";
@@ -209,7 +244,7 @@ export async function browse(ref) {
   }
 
   try {
-    const res = await kino.tmdb(path, params);
+    const res = await tmdbQuery(path, params);
     if (!res || !Array.isArray(res.results)) return { items: [] };
 
     const mediaType = data.list.includes("tv") ? "series" : "movie";
@@ -221,7 +256,7 @@ export async function browse(ref) {
       next: page < totalPages && page < 20 ? encodeRef({ list: data.list, page: page + 1 }) : undefined
     };
   } catch (e) {
-    kino.log("Error en browse", e);
+    kino.log("Error en browse:", e);
     return { items: [] };
   }
 }
@@ -235,16 +270,16 @@ export async function episodes(ref) {
   if (!data || !data.tmdbId) return [];
 
   try {
-    const show = await kino.tmdb(`/tv/${data.tmdbId}`, { language: LANG });
+    const show = await tmdbQuery(`/tv/${data.tmdbId}`);
     if (!show || !Array.isArray(show.seasons)) return [];
 
     const epList = [];
 
     for (const s of show.seasons) {
-      if (s.season_number <= 0) continue; // omitir especiales
+      if (s.season_number <= 0) continue;
 
       try {
-        const seasonData = await kino.tmdb(`/tv/${data.tmdbId}/season/${s.season_number}`, { language: LANG });
+        const seasonData = await tmdbQuery(`/tv/${data.tmdbId}/season/${s.season_number}`);
         if (seasonData && Array.isArray(seasonData.episodes)) {
           for (const ep of seasonData.episodes) {
             epList.push({
@@ -265,13 +300,13 @@ export async function episodes(ref) {
           }
         }
       } catch (err) {
-        kino.log(`Error cargando temporada ${s.season_number}`, err);
+        kino.log(`Error en temporada ${s.season_number}:`, err);
       }
     }
 
     return epList;
   } catch (e) {
-    kino.log("Error cargando temporadas de serie", e);
+    kino.log("Error cargando temporadas:", e);
     return [];
   }
 }
@@ -287,7 +322,6 @@ export async function resolve(ref) {
   const titleSlug = slugify(data.title);
   const origSlug = slugify(data.originalTitle);
 
-  // Generar posibles rutas en relampagomovies.com
   const candidates = [];
   if (data.type === "tv" && data.season && data.episode) {
     candidates.push(`${SITE_BASE}/serie/${titleSlug}-temporada-${data.season}-capitulo-${data.episode}`);
@@ -304,14 +338,13 @@ export async function resolve(ref) {
     }
   }
 
-  // 1. Intento de captura directa con kino.browser.capture
-  // En resolve(), Kino garantiza que el usuario pulsó Play, por lo que browser.capture está permitido
+  // Reproducción en primer plano con browser.capture
   if (kino.browser && kino.browser.capture) {
     for (const url of candidates) {
-      kino.log("Intentando reproducir en Relámpago Movies con capture", url);
+      kino.log("Intentando capturar reproductor en:", url);
       try {
         const captured = await kino.browser.capture(url, {
-          timeoutMs: 25000,
+          timeoutMs: 22000,
           autoplay: true
         });
 
@@ -331,11 +364,8 @@ export async function resolve(ref) {
           };
         }
       } catch (err) {
-        kino.log(`Capture fallo en ${url}`, err && err.code ? err.code : err);
-        if (err && err.code === "blocked") {
-          // Si Cloudflare solicitó captcha humano interactivo, detener intento en este host
-          break;
-        }
+        kino.log(`Capture fallo en ${url}:`, err && err.code ? err.code : err);
+        if (err && err.code === "blocked") break;
       }
     }
   }
@@ -359,22 +389,22 @@ export async function migrate(title) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// AJUSTES Y ESTADO
+// AJUSTES Y ACCIONES
 // ──────────────────────────────────────────────────────────────
 
 export async function settingsStatus() {
   return {
-    status_info: "Catálogo conectado a TMDB y reproductor a Relámpago Movies"
+    status_info: "Catálogo TMDB listo y extractor de video configurado"
   };
 }
 
 export async function action(key) {
   if (key === "clear_cache") {
     try {
-      kino.storage.remove("home_catalog");
+      kino.storage.remove("home_catalog_v2");
     } catch {}
     return {
-      message: "Caché limpiada correctamente",
+      message: "Caché de portada eliminada correctamente",
       refresh: true
     };
   }
@@ -382,13 +412,13 @@ export async function action(key) {
   if (key === "check_connection") {
     let ok = false;
     try {
-      const res = await kino.tmdb("/configuration");
+      const res = await tmdbQuery("/configuration");
       ok = Boolean(res);
     } catch {
       ok = false;
     }
     return {
-      message: ok ? "Conexión a TMDB funcionando correctamente" : "Fallo al conectar con TMDB",
+      message: ok ? "Conexión con catálogo TMDB exitosa" : "Error de conexión con el catálogo",
       refresh: true
     };
   }

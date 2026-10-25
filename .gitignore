@@ -1,0 +1,11 @@
+# Estado local del SDK de Kino
+.kino-storage.json
+.kino-cookies.json
+.kino-config.json
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Dependencias
+node_modules/

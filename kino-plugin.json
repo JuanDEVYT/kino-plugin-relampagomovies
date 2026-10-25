@@ -1,7 +1,7 @@
 {
   "id": "relampagomovies",
   "name": "Relámpago Movies",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "apiVersion": 6,
   "entry": "plugin.js",
   "icon": "icon.png",
@@ -45,11 +45,11 @@
   },
   "settings": [
     {
-      "key": "direct_only",
-      "label": "Solo reproducción directa",
-      "type": "toggle",
-      "default": false,
-      "hint": "Si está activo, no abre el navegador oculto si falla el reproductor directo"
+      "key": "tmdb_api_key",
+      "label": "Clave API de TMDB (opcional)",
+      "type": "text",
+      "hint": "Tu clave personal de themoviedb.org para el catálogo",
+      "default": ""
     },
     {
       "key": "status_info",
