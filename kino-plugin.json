@@ -1,0 +1,68 @@
+{
+  "id": "relampagomovies",
+  "name": "Relámpago Movies",
+  "version": "1.0.0",
+  "apiVersion": 6,
+  "entry": "plugin.js",
+  "icon": "icon.png",
+  "description": "Películas y series en español y latino desde relampagomovies.com",
+  "author": "JuanDEVYT",
+  "homepage": "https://github.com/JuanDEVYT/kino-plugin-relampagomovies",
+  "hosts": [
+    "relampagomovies.com",
+    "*.relampagomovies.com",
+    "mediadelivery.net",
+    "*.mediadelivery.net",
+    "b-cdn.net",
+    "*.b-cdn.net",
+    "filemoon.sx",
+    "*.filemoon.sx",
+    "filemoon.to",
+    "*.filemoon.to"
+  ],
+  "streamHosts": "any",
+  "browser": "pages",
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve",
+    "download",
+    "scopedSearch",
+    "migrate"
+  ],
+  "categories": [
+    "movies",
+    "series"
+  ],
+  "theme": {
+    "accent": "#F59E0B",
+    "onAccent": "#000000",
+    "background": "#0F172A"
+  },
+  "settings": [
+    {
+      "key": "direct_only",
+      "label": "Solo reproducción directa",
+      "type": "toggle",
+      "default": false,
+      "hint": "Si está activo, no abre el navegador oculto si falla el reproductor directo"
+    },
+    {
+      "key": "status_info",
+      "label": "Estado de conexión",
+      "type": "status"
+    },
+    {
+      "key": "check_connection",
+      "label": "Comprobar sitio web",
+      "type": "action"
+    },
+    {
+      "key": "clear_cache",
+      "label": "Limpiar datos guardados en caché",
+      "type": "action"
+    }
+  ]
+}
