@@ -1,47 +1,17 @@
 /// <reference path="./kino.d.ts" />
 
 // Plugin de Kino para Relámpago Movies (relampagomovies.com)
-// Idiomas: Español / Latino
-// apiVersion: 6 (Soporte de Cloudflare con kino.browser.page y kino.browser.capture)
+// Catálogo enriquecido con TMDB (kino.tmdb nativo)
+// Reproductor directo y captura dinámica con kino.browser.capture (al pulsar Play)
 
-const BASE = "https://relampagomovies.com";
-const CACHE_MS = 24 * 60 * 60 * 1000; // 24 horas
+const SITE_BASE = "https://relampagomovies.com";
+const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
+const TMDB_BACKDROP = "https://image.tmdb.org/t/p/w780";
+const LANG = "es-MX";
 
 // ──────────────────────────────────────────────────────────────
-// UTILIDADES Y AYUDAS
+// HELPERS Y REF ENCODING
 // ──────────────────────────────────────────────────────────────
-
-function siteUrl(path) {
-  const s = String(path || "");
-  return /^https?:\/\//i.test(s) ? s : BASE + (s.startsWith("/") ? s : "/" + s);
-}
-
-function decodeHtml(html) {
-  return String(html || "")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&");
-}
-
-function stripTags(html) {
-  return decodeHtml(String(html || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
-}
-
-function cleanTitle(raw) {
-  return stripTags(raw)
-    .replace(/\s*\(?(?:1080p|720p|4k|hd|latino|castellano|subtitulado|dual)\)?/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractYear(text) {
-  const m = String(text || "").match(/\b(19\d{2}|20\d{2})\b/);
-  return m ? parseInt(m[1], 10) : undefined;
-}
 
 function encodeRef(data) {
   return JSON.stringify(data);
@@ -55,374 +25,370 @@ function decodeRef(ref) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────
-// LECTURA DE PÁGINAS (Con fallback a kino.browser.page si hay Cloudflare)
-// ──────────────────────────────────────────────────────────────
-
-async function fetchPage(url, waitFor) {
-  // Primero intento rápido con kino.fetch
-  try {
-    const res = await kino.fetch(siteUrl(url));
-    if (res.ok && res.text) {
-      const text = res.text();
-      // Si no es el challenge de Cloudflare, devolver el HTML directamente
-      if (!/just a moment|cf-chl|challenge-platform/i.test(text)) {
-        return text;
-      }
-    }
-  } catch (e) {
-    kino.log("kino.fetch falló, recurriendo al navegador de Kino", e && e.code ? e.code : e);
-  }
-
-  // Si hay bloqueo por Cloudflare o protección, usar el browser integrado de Kino
-  if (kino.browser && kino.browser.page) {
-    try {
-      const page = await kino.browser.page(siteUrl(url), {
-        waitFor: waitFor || /<article|<div class="item|class="movie|class="poster/i,
-        timeoutMs: 14000
-      });
-      return page.html || "";
-    } catch (err) {
-      kino.log("kino.browser.page fallo", err && err.code ? err.code : err);
-      if (err && (err.code === "blocked" || err.code === "busy" || err.code === "rate_limited" || err.code === "browser_unavailable")) {
-        return "";
-      }
-      throw err;
-    }
-  }
-
-  return "";
+function slugify(title) {
+  return String(title || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
-// ──────────────────────────────────────────────────────────────
-// PARSEO DE TARJETAS HTML (Películas y Series)
-// ──────────────────────────────────────────────────────────────
+function mapTmdbItem(item, mediaType) {
+  const type = mediaType || item.media_type || (item.first_air_date ? "series" : "movie");
+  const isSeries = type === "series" || type === "tv";
+  const title = item.title || item.name || item.original_title || item.original_name || "";
+  const yearStr = item.release_date || item.first_air_date || "";
+  const year = yearStr ? parseInt(yearStr.slice(0, 4), 10) : undefined;
+  const rating = typeof item.vote_average === "number" && item.vote_average > 0
+    ? Math.round(item.vote_average * 10) / 10
+    : undefined;
 
-function parseItemCards(html) {
-  const items = [];
-  const seenIds = new Set();
-
-  // Patrón 1: Artículos y bloques habituales en temas de películas (Dooplay, Toroplay o a medida)
-  const blockMatches = html.match(/<article[\s\S]*?<\/article>|<div class="(?:item|poster|movie-item|ml-item)[\s\S]*?<\/div>\s*<\/div>/gi) || [];
-
-  for (const block of blockMatches) {
-    const linkMatch = block.match(/href=["'](https?:\/\/[^"']+|\/[^"']+)["']/i);
-    if (!linkMatch) continue;
-
-    const href = linkMatch[1];
-    // Ignorar enlaces de categorías o páginas estáticas
-    if (/\/(category|tag|genero|author|page|contact|dmca)\//i.test(href)) continue;
-
-    const titleMatch = block.match(/alt=["']([^"']+)["']/i) ||
-      block.match(/title=["']([^"']+)["']/i) ||
-      block.match(/<h[234][^>]*>([\s\S]*?)<\/h[234]>/i);
-    const rawTitle = titleMatch ? titleMatch[1] : "";
-    const title = cleanTitle(rawTitle);
-    if (!title) continue;
-
-    const imgMatch = block.match(/data-src=["']([^"']+)["']/i) ||
-      block.match(/src=["']([^"']+)["']/i);
-    const poster = imgMatch ? siteUrl(imgMatch[1]) : undefined;
-
-    const year = extractYear(block) || extractYear(title);
-    const isSeries = /serie|season|temporada/i.test(href) || /temporada/i.test(block);
-
-    const slug = href.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+|\/+$/g, "");
-    const id = slug || title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-
-    if (seenIds.has(id)) continue;
-    seenIds.add(id);
-
-    items.push({
-      id: (isSeries ? "serie." : "pelicula.") + id,
+  return {
+    id: (isSeries ? "tv." : "movie.") + item.id,
+    title,
+    type: isSeries ? "series" : "movie",
+    poster: item.poster_path ? TMDB_IMG + item.poster_path : undefined,
+    backdrop: item.backdrop_path ? TMDB_BACKDROP + item.backdrop_path : undefined,
+    year,
+    rating,
+    overview: item.overview || undefined,
+    ref: encodeRef({
+      tmdbId: item.id,
+      type: isSeries ? "tv" : "movie",
       title,
-      type: isSeries ? "series" : "movie",
-      poster,
       year,
-      ref: encodeRef({ href: siteUrl(href), type: isSeries ? "serie" : "pelicula", title })
-    });
-  }
-
-  // Fallback genérico si los bloques eran diferentes: buscar todos los enlaces con /movie- o /online-
-  if (items.length === 0) {
-    const genericRe = /<a[^>]+href=["']((?:https:\/\/relampagomovies\.com)?\/(?:movie|online|pelicula|serie)[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
-    let m;
-    while ((m = genericRe.exec(html)) !== null) {
-      const href = m[1];
-      const inner = m[2];
-      const imgMatch = inner.match(/src=["']([^"']+)["']/i) || inner.match(/data-src=["']([^"']+)["']/i);
-      const titleMatch = inner.match(/alt=["']([^"']+)["']/i) || inner.match(/title=["']([^"']+)["']/i) || [null, inner];
-      const title = cleanTitle(titleMatch[1]);
-      if (!title || title.length < 2) continue;
-
-      const slug = href.replace(/^https?:\/\/[^/]+/i, "").replace(/^\/+|\/+$/g, "");
-      const isSeries = /serie|temporada/i.test(href);
-      const id = slug;
-
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-
-      items.push({
-        id: (isSeries ? "serie." : "pelicula.") + id,
-        title,
-        type: isSeries ? "series" : "movie",
-        poster: imgMatch ? siteUrl(imgMatch[1]) : undefined,
-        year: extractYear(inner) || extractYear(title),
-        ref: encodeRef({ href: siteUrl(href), type: isSeries ? "serie" : "pelicula", title })
-      });
-    }
-  }
-
-  return items;
+      originalTitle: item.original_title || item.original_name || title
+    })
+  };
 }
 
 // ──────────────────────────────────────────────────────────────
-// EXPORTS DE KINO
+// HOME (PORTADA CON TMDB NATIVO)
 // ──────────────────────────────────────────────────────────────
 
 export async function home() {
-  const cached = kino.storage.get("home_rows");
+  if (typeof kino.tmdb !== "function") {
+    throw kino.error("unavailable", "Kino 0.9.53+ requerido para TMDB", {
+      userMessage: "Actualiza Kino a la versión 0.9.53 o superior para usar este plugin."
+    });
+  }
+
+  const cached = kino.storage.get("home_catalog");
   if (cached) {
     try {
       return JSON.parse(cached);
     } catch {}
   }
 
-  const html = await fetchPage(`${BASE}/`);
-  if (!html) {
-    return [
-      {
-        id: "estrenos",
-        title: "Estrenos y Destacados",
-        items: []
-      }
-    ];
-  }
-
-  const allItems = parseItemCards(html);
-  const movies = allItems.filter((i) => i.type === "movie");
-  const series = allItems.filter((i) => i.type === "series");
-
   const rows = [];
-  if (movies.length > 0) {
-    rows.push({
-      id: "peliculas-recientes",
-      title: "Películas Recientes",
-      items: movies.slice(0, 20),
-      browse: movies.length >= 20 ? encodeRef({ path: "/peliculas", page: 2 }) : undefined
-    });
-  }
 
-  if (series.length > 0) {
-    rows.push({
-      id: "series-recientes",
-      title: "Series Populares",
-      items: series.slice(0, 20),
-      browse: series.length >= 20 ? encodeRef({ path: "/series", page: 2 }) : undefined
-    });
-  }
-
-  if (rows.length === 0 && allItems.length > 0) {
-    rows.push({
-      id: "catalogo-general",
-      title: "Novedades de Relámpago Movies",
-      items: allItems.slice(0, 25)
-    });
-  }
-
+  // 1. Tendencias en Películas
   try {
-    kino.storage.set("home_rows", JSON.stringify(rows), { ttlMs: CACHE_MS });
-  } catch {}
+    const popMovies = await kino.tmdb("/trending/movie/week", { language: LANG });
+    if (popMovies && Array.isArray(popMovies.results) && popMovies.results.length > 0) {
+      rows.push({
+        id: "peliculas-tendencia",
+        title: "Películas en Tendencia",
+        items: popMovies.results.slice(0, 20).map((i) => mapTmdbItem(i, "movie")),
+        browse: encodeRef({ list: "trending_movie", page: 2 })
+      });
+    }
+  } catch (e) {
+    kino.log("Error al cargar trending movies de TMDB", e);
+  }
+
+  // 2. Tendencias en Series
+  try {
+    const popTv = await kino.tmdb("/trending/tv/week", { language: LANG });
+    if (popTv && Array.isArray(popTv.results) && popTv.results.length > 0) {
+      rows.push({
+        id: "series-tendencia",
+        title: "Series Populares",
+        items: popTv.results.slice(0, 20).map((i) => mapTmdbItem(i, "series")),
+        browse: encodeRef({ list: "trending_tv", page: 2 })
+      });
+    }
+  } catch (e) {
+    kino.log("Error al cargar trending TV de TMDB", e);
+  }
+
+  // 3. Estrenos de cine
+  try {
+    const nowPlaying = await kino.tmdb("/movie/now_playing", { language: LANG });
+    if (nowPlaying && Array.isArray(nowPlaying.results) && nowPlaying.results.length > 0) {
+      rows.push({
+        id: "estrenos-cine",
+        title: "Estrenos Recientes en Cine",
+        items: nowPlaying.results.slice(0, 20).map((i) => mapTmdbItem(i, "movie")),
+        browse: encodeRef({ list: "now_playing", page: 2 })
+      });
+    }
+  } catch (e) {
+    kino.log("Error al cargar now_playing de TMDB", e);
+  }
+
+  // 4. Animación familiar
+  try {
+    const animation = await kino.tmdb("/discover/movie", {
+      language: LANG,
+      with_genres: "16",
+      sort_by: "popularity.desc"
+    });
+    if (animation && Array.isArray(animation.results) && animation.results.length > 0) {
+      rows.push({
+        id: "animacion",
+        title: "Animación y Familiar",
+        items: animation.results.slice(0, 20).map((i) => mapTmdbItem(i, "movie")),
+        browse: encodeRef({ list: "genre_16", page: 2 })
+      });
+    }
+  } catch (e) {
+    kino.log("Error al cargar animación", e);
+  }
+
+  if (rows.length > 0) {
+    try {
+      kino.storage.set("home_catalog", JSON.stringify(rows), { ttlMs: 12 * 60 * 60 * 1000 });
+    } catch {}
+  }
 
   return rows;
 }
 
+// ──────────────────────────────────────────────────────────────
+// BUSCADOR
+// ──────────────────────────────────────────────────────────────
+
 export async function search(query) {
   if (query && query.within) {
-    // Si Kino pide buscar dentro de una página específica o fila "Ver más" que no filtramos
     return null;
   }
+
   const q = (query && query.q ? String(query.q) : "").trim();
   if (!q) return [];
 
-  const searchUrl = `${BASE}/?s=${encodeURIComponent(q)}`;
-  const html = await fetchPage(searchUrl);
-  if (!html) return [];
+  try {
+    const res = await kino.tmdb("/search/multi", {
+      query: q,
+      language: LANG,
+      include_adult: "false"
+    });
 
-  const items = parseItemCards(html);
-  return items.slice(0, 30);
+    if (!res || !Array.isArray(res.results)) return [];
+
+    return res.results
+      .filter((i) => i.media_type === "movie" || i.media_type === "tv")
+      .slice(0, 30)
+      .map((i) => mapTmdbItem(i, i.media_type === "tv" ? "series" : "movie"));
+  } catch (err) {
+    kino.log("Error en search TMDB", err);
+    return [];
+  }
 }
+
+// ──────────────────────────────────────────────────────────────
+// BROWSE (VER MÁS)
+// ──────────────────────────────────────────────────────────────
 
 export async function browse(ref) {
   const data = decodeRef(ref);
-  if (!data || !data.path) return { items: [] };
+  if (!data || !data.list) return { items: [] };
 
   const page = data.page || 1;
-  const path = data.path.includes("?") ? `${data.path}&page=${page}` : `${data.path}/page/${page}`;
-  const html = await fetchPage(siteUrl(path));
-  if (!html) return { items: [] };
+  let path = "/trending/movie/week";
+  const params = { language: LANG, page: String(page) };
 
-  const items = parseItemCards(html);
-  const hasMore = items.length >= 15;
+  if (data.list === "trending_movie") path = "/trending/movie/week";
+  else if (data.list === "trending_tv") path = "/trending/tv/week";
+  else if (data.list === "now_playing") path = "/movie/now_playing";
+  else if (data.list.startsWith("genre_")) {
+    path = "/discover/movie";
+    params.with_genres = data.list.replace("genre_", "");
+    params.sort_by = "popularity.desc";
+  }
 
-  return {
-    items,
-    next: hasMore ? encodeRef({ path: data.path, page: page + 1 }) : undefined
-  };
+  try {
+    const res = await kino.tmdb(path, params);
+    if (!res || !Array.isArray(res.results)) return { items: [] };
+
+    const mediaType = data.list.includes("tv") ? "series" : "movie";
+    const items = res.results.map((i) => mapTmdbItem(i, mediaType));
+    const totalPages = res.total_pages || 1;
+
+    return {
+      items,
+      next: page < totalPages && page < 20 ? encodeRef({ list: data.list, page: page + 1 }) : undefined
+    };
+  } catch (e) {
+    kino.log("Error en browse", e);
+    return { items: [] };
+  }
 }
+
+// ──────────────────────────────────────────────────────────────
+// EPISODIOS (PARA SERIES DE TV)
+// ──────────────────────────────────────────────────────────────
 
 export async function episodes(ref) {
   const data = decodeRef(ref);
-  if (!data || !data.href) return [];
+  if (!data || !data.tmdbId) return [];
 
-  const html = await fetchPage(data.href);
-  if (!html) return [];
+  try {
+    const show = await kino.tmdb(`/tv/${data.tmdbId}`, { language: LANG });
+    if (!show || !Array.isArray(show.seasons)) return [];
 
-  const episodesList = [];
-  // Buscar enlaces y listas de capítulos
-  const epRe = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  let counter = 1;
+    const epList = [];
 
-  while ((m = epRe.exec(html)) !== null) {
-    const href = m[1];
-    const text = stripTags(m[2]);
+    for (const s of show.seasons) {
+      if (s.season_number <= 0) continue; // omitir especiales
 
-    const seasonMatch = href.match(/temporada[/-](\d+)/i) || text.match(/(?:T|Temporada)\s*(\d+)/i);
-    const epMatch = href.match(/episodio[/-](\d+)/i) || text.match(/(?:E|Capitulo|Episodio)\s*(\d+)/i);
-
-    if (seasonMatch && epMatch) {
-      const season = parseInt(seasonMatch[1], 10);
-      const episode = parseInt(epMatch[1], 10);
-
-      episodesList.push({
-        season,
-        episode,
-        title: text || `Episodio ${episode}`,
-        ref: encodeRef({ href: siteUrl(href), type: "episodio", season, episode })
-      });
+      try {
+        const seasonData = await kino.tmdb(`/tv/${data.tmdbId}/season/${s.season_number}`, { language: LANG });
+        if (seasonData && Array.isArray(seasonData.episodes)) {
+          for (const ep of seasonData.episodes) {
+            epList.push({
+              season: ep.season_number,
+              episode: ep.episode_number,
+              title: ep.name ? `${ep.episode_number}. ${ep.name}` : `Episodio ${ep.episode_number}`,
+              overview: ep.overview || undefined,
+              ref: encodeRef({
+                tmdbId: data.tmdbId,
+                title: data.title,
+                originalTitle: data.originalTitle,
+                year: data.year,
+                type: "tv",
+                season: ep.season_number,
+                episode: ep.episode_number
+              })
+            });
+          }
+        }
+      } catch (err) {
+        kino.log(`Error cargando temporada ${s.season_number}`, err);
+      }
     }
-  }
 
-  return episodesList;
+    return epList;
+  } catch (e) {
+    kino.log("Error cargando temporadas de serie", e);
+    return [];
+  }
 }
+
+// ──────────────────────────────────────────────────────────────
+// RESOLVE (REPRODUCCIÓN AL PULSAR PLAY)
+// ──────────────────────────────────────────────────────────────
 
 export async function resolve(ref) {
   const data = decodeRef(ref);
-  if (!data || !data.href) {
-    throw kino.error("not_found", "Referencia no válida");
+  if (!data) throw kino.error("not_found", "Referencia no válida");
+
+  const titleSlug = slugify(data.title);
+  const origSlug = slugify(data.originalTitle);
+
+  // Generar posibles rutas en relampagomovies.com
+  const candidates = [];
+  if (data.type === "tv" && data.season && data.episode) {
+    candidates.push(`${SITE_BASE}/serie/${titleSlug}-temporada-${data.season}-capitulo-${data.episode}`);
+    candidates.push(`${SITE_BASE}/${titleSlug}-temporada-${data.season}-capitulo-${data.episode}`);
+    if (origSlug && origSlug !== titleSlug) {
+      candidates.push(`${SITE_BASE}/serie/${origSlug}-temporada-${data.season}-capitulo-${data.episode}`);
+    }
+  } else {
+    candidates.push(`${SITE_BASE}/pelicula/${titleSlug}`);
+    candidates.push(`${SITE_BASE}/${titleSlug}`);
+    if (origSlug && origSlug !== titleSlug) {
+      candidates.push(`${SITE_BASE}/pelicula/${origSlug}`);
+      candidates.push(`${SITE_BASE}/${origSlug}`);
+    }
   }
 
-  const directOnly = kino.config.get("direct_only") === true;
-  const targetUrl = siteUrl(data.href);
+  // 1. Intento de captura directa con kino.browser.capture
+  // En resolve(), Kino garantiza que el usuario pulsó Play, por lo que browser.capture está permitido
+  if (kino.browser && kino.browser.capture) {
+    for (const url of candidates) {
+      kino.log("Intentando reproducir en Relámpago Movies con capture", url);
+      try {
+        const captured = await kino.browser.capture(url, {
+          timeoutMs: 25000,
+          autoplay: true
+        });
 
-  // 1. Intentar obtener el HTML de la página para encontrar iframes directos (ej. bunnycdn / mediadelivery / filemoon)
-  const html = await fetchPage(targetUrl);
-  if (html) {
-    // Buscar iframe de mediadelivery o bunnycdn
-    const mediaIframeMatch = html.match(/src=["'](https:\/\/(?:iframe\.mediadelivery\.net|[^"']*\.b-cdn\.net)[^"']+)["']/i);
-    if (mediaIframeMatch) {
-      const iframeUrl = mediaIframeMatch[1];
-      return {
-        url: iframeUrl,
-        headers: {
-          Referer: `${BASE}/`,
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        if (captured && Array.isArray(captured.media) && captured.media.length > 0) {
+          const media = captured.media[0];
+          const subs = Array.isArray(captured.subtitles)
+            ? captured.subtitles
+                .filter((s) => s && s.url)
+                .map((s) => ({ url: s.url, lang: s.lang || "es" }))
+            : [];
+
+          return {
+            url: media.url,
+            headers: media.headers || { Referer: `${SITE_BASE}/` },
+            mime: media.mime || undefined,
+            ...(subs.length > 0 ? { subtitles: subs } : {})
+          };
         }
-      };
-    }
-
-    // Buscar enlace directo a filemoon u otro hosting
-    const filemoonMatch = html.match(/src=["'](https:\/\/(?:filemoon\.(?:sx|to)|[^"']+\/e\/)[^"']+)["']/i);
-    if (filemoonMatch) {
-      return {
-        url: filemoonMatch[1],
-        headers: {
-          Referer: `${BASE}/`
+      } catch (err) {
+        kino.log(`Capture fallo en ${url}`, err && err.code ? err.code : err);
+        if (err && err.code === "blocked") {
+          // Si Cloudflare solicitó captcha humano interactivo, detener intento en este host
+          break;
         }
-      };
+      }
     }
   }
 
-  // 2. Si no hay iframe o enlace directo visible, usar el reproductor con kino.browser.capture
-  if (!directOnly && kino.browser && kino.browser.capture) {
-    kino.log("Iniciando captura de video en browser oculto de Kino", targetUrl);
-    const captured = await kino.browser.capture(targetUrl, {
-      timeoutMs: 25000,
-      autoplay: true
-    });
-
-    if (captured && captured.media && captured.media.length > 0) {
-      const best = captured.media[0];
-      const subs = Array.isArray(captured.subtitles)
-        ? captured.subtitles
-            .filter((s) => s && s.url)
-            .map((s) => ({ url: s.url, lang: s.lang || "es" }))
-        : [];
-
-      return {
-        url: best.url,
-        headers: best.headers || { Referer: `${BASE}/` },
-        mime: best.mime || undefined,
-        ...(subs.length > 0 ? { subtitles: subs } : {})
-      };
-    }
-  }
-
-  throw kino.error("not_found", "No se encontró enlace reproducible para este contenido");
+  throw kino.error("not_found", "No se encontró enlace reproducible en relampagomovies.com", {
+    userMessage: "No se pudo obtener el video de Relámpago Movies. Intenta con otro título."
+  });
 }
+
+// ──────────────────────────────────────────────────────────────
+// MIGRATE
+// ──────────────────────────────────────────────────────────────
 
 export async function migrate(title) {
   if (!title || !title.title) return null;
   const results = await search({ q: title.title });
-  if (results.length === 0) return null;
+  if (!results.length) return null;
 
   const exact = results.find((r) => r.title.toLowerCase() === title.title.toLowerCase());
   return exact || results[0];
 }
 
 // ──────────────────────────────────────────────────────────────
-// AJUSTES Y ACCIONES
+// AJUSTES Y ESTADO
 // ──────────────────────────────────────────────────────────────
 
 export async function settingsStatus() {
-  const status = kino.storage.get("site_status");
   return {
-    status_info: status === "online"
-      ? "relampagomovies.com respondió correctamente"
-      : status === "offline"
-        ? "Sin respuesta del sitio web (Cloudflare activo)"
-        : "Sin comprobar todavía"
+    status_info: "Catálogo conectado a TMDB y reproductor a Relámpago Movies"
   };
 }
 
 export async function action(key) {
-  if (key === "check_connection") {
-    let ok = false;
+  if (key === "clear_cache") {
     try {
-      const res = await kino.fetch(`${BASE}/`);
-      ok = res.ok;
-    } catch {
-      ok = false;
-    }
-    try {
-      kino.storage.set("site_status", ok ? "online" : "offline");
+      kino.storage.remove("home_catalog");
     } catch {}
     return {
-      message: ok
-        ? "Conexión exitosa con relampagomovies.com"
-        : "El sitio respondió con challenge de Cloudflare (usará browser de Kino)",
+      message: "Caché limpiada correctamente",
       refresh: true
     };
   }
 
-  if (key === "clear_cache") {
+  if (key === "check_connection") {
+    let ok = false;
     try {
-      kino.storage.remove("home_rows");
-      kino.storage.remove("site_status");
-    } catch {}
+      const res = await kino.tmdb("/configuration");
+      ok = Boolean(res);
+    } catch {
+      ok = false;
+    }
     return {
-      message: "Caché de Relámpago Movies limpiada correctamente",
+      message: ok ? "Conexión a TMDB funcionando correctamente" : "Fallo al conectar con TMDB",
       refresh: true
     };
   }

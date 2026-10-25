@@ -11,6 +11,8 @@
   "hosts": [
     "relampagomovies.com",
     "*.relampagomovies.com",
+    "api.themoviedb.org",
+    "image.tmdb.org",
     "mediadelivery.net",
     "*.mediadelivery.net",
     "b-cdn.net",
@@ -21,7 +23,7 @@
     "*.filemoon.to"
   ],
   "streamHosts": "any",
-  "browser": "pages",
+  "browser": true,
   "capabilities": [
     "search",
     "home",
